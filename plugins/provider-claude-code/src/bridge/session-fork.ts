@@ -6,8 +6,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { createWriteStream } from "node:fs";
 import { open, readdir, type FileHandle } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import {
   isMainThread,
@@ -32,12 +31,6 @@ type ClaudeSessionFork = {
   sourceSessionId: string;
   upToMessageId: string | undefined;
 };
-
-export function claudeConfigDirectory(env: NodeJS.ProcessEnv): string {
-  return env.CLAUDE_CONFIG_DIR
-    ? resolve(env.CLAUDE_CONFIG_DIR)
-    : join(homedir(), ".claude");
-}
 
 export function forkClaudeSession(args: ClaudeSessionFork): Promise<string> {
   const worker = new Worker(new URL(import.meta.url), {
