@@ -127,29 +127,33 @@ function compareSkillSummaries(
   return left.filePath.localeCompare(right.filePath);
 }
 
+function toProviderSkillSummary(
+  provider: SkillProvider,
+  skill: DiscoveredSkill,
+): SkillSummary {
+  const mapped = mapSkillScope(provider, skill.rootKind, skill.filePath);
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    provider: mapped.provider,
+    scope: mapped.scope,
+    pluginId:
+      skill.rootKind === "plugin"
+        ? (skill.name.split(":", 1)[0] ?? skill.name)
+        : null,
+    filePath: skill.filePath,
+    manageable: mapped.manageable && !skill.linked,
+    registrySkillId: null,
+  };
+}
+
 export function assembleSkillList(
   perProvider: readonly ProviderSkillDiscovery[],
 ): SkillSummary[] {
-  const registrations: SkillSummary[] = [];
-  for (const { provider, skills } of perProvider) {
-    for (const skill of skills) {
-      const mapped = mapSkillScope(provider, skill.rootKind, skill.filePath);
-      registrations.push({
-        id: skill.id,
-        name: skill.name,
-        description: skill.description,
-        provider: mapped.provider,
-        scope: mapped.scope,
-        pluginId:
-          skill.rootKind === "plugin"
-            ? (skill.name.split(":", 1)[0] ?? skill.name)
-            : null,
-        filePath: skill.filePath,
-        manageable: mapped.manageable && !skill.linked,
-        registrySkillId: null,
-      });
-    }
-  }
+  const registrations = perProvider.flatMap(({ provider, skills }) =>
+    skills.map((skill) => toProviderSkillSummary(provider, skill)),
+  );
   return firstPerIdentity(registrations, (skill) => skill.id).sort(
     compareSkillSummaries,
   );
@@ -215,39 +219,58 @@ async function listBbPluginSkills(deps: AppDeps): Promise<SkillSummary[]> {
     .sort(compareSkillSummaries);
 }
 
+async function listServerSkills(deps: AppDeps): Promise<SkillSummary[]> {
+  return [
+    ...(await listServerOwnedSkills(deps)),
+    ...(await listBbPluginSkills(deps)),
+  ];
+}
+
+async function confirmServerSkillManageable(
+  skill: SkillSummary,
+): Promise<void> {
+  if (!skill.manageable) return;
+  const directory = path.dirname(skill.filePath);
+  const stats = await Promise.all(
+    [path.dirname(directory), directory, skill.filePath].map((entry) =>
+      fs.lstat(entry).catch(() => null),
+    ),
+  );
+  skill.manageable = stats.every(
+    (stat) => stat !== null && !stat.isSymbolicLink(),
+  );
+}
+
+function scanProviderSkills(
+  deps: AppDeps,
+  workspace: CommandWorkspace,
+): Array<Promise<ProviderSkillDiscovery>> {
+  return deps.providerRegistry
+    .list()
+    .filter(providerHasNativeRootSurface)
+    .map(async (registration): Promise<ProviderSkillDiscovery> => {
+      const result = await scanProviderNativeRoots(deps, {
+        type: "host.list_skills",
+        registration,
+        hostId: workspace.hostId,
+        cwd: workspace.cwd,
+      });
+      return { provider: registration.info.id, skills: result.skills };
+    });
+}
+
 async function projectSkillIndex(
   deps: AppDeps,
   args: { workspace: CommandWorkspace },
-): Promise<{
-  registrations: IndexedSkillSummary[];
-  entries: IndexedSkillSummary[];
-}> {
-  const skillProviders = deps.providerRegistry
-    .list()
-    .filter(providerHasNativeRootSurface);
+): Promise<IndexedSkillSummary[]> {
   const [perProvider, sharedSkills] = await Promise.all([
-    Promise.all(
-      skillProviders.map(
-        async (registration): Promise<ProviderSkillDiscovery> => {
-          const result = await scanProviderNativeRoots(deps, {
-            type: "host.list_skills",
-            registration,
-            hostId: args.workspace.hostId,
-            cwd: args.workspace.cwd,
-          });
-          return { provider: registration.info.id, skills: result.skills };
-        },
-      ),
-    ),
+    Promise.all(scanProviderSkills(deps, args.workspace)),
     resolveSharedSkills(deps, {
       hostId: args.workspace.hostId,
       cwd: args.workspace.cwd,
     }),
   ]);
-  const serverSkills = [
-    ...(await listServerOwnedSkills(deps)),
-    ...(await listBbPluginSkills(deps)),
-  ];
+  const serverSkills = await listServerSkills(deps);
   const identities = new Map(sharedSkills.identities);
   for (const { skills } of perProvider) {
     for (const skill of skills)
@@ -257,17 +280,7 @@ async function projectSkillIndex(
       });
   }
   for (const skill of serverSkills) {
-    if (skill.manageable) {
-      const directory = path.dirname(skill.filePath);
-      const stats = await Promise.all(
-        [path.dirname(directory), directory, skill.filePath].map((entry) =>
-          fs.lstat(entry).catch(() => null),
-        ),
-      );
-      skill.manageable = stats.every(
-        (stat) => stat !== null && !stat.isSymbolicLink(),
-      );
-    }
+    await confirmServerSkillManageable(skill);
     const bytes = await fs.readFile(skill.filePath).catch(() => null);
     const realPath = await fs.realpath(skill.filePath).catch(() => null);
     if (bytes !== null && realPath !== null)
@@ -292,21 +305,18 @@ async function projectSkillIndex(
       ...skill,
       realPath: identities.get(skill.id)?.realPath ?? skill.filePath,
     }));
-  return {
+  return firstPerIdentity(
     registrations,
-    entries: firstPerIdentity(
-      registrations,
-      (skill) =>
-        `${skill.name}\0${identities.get(skill.id)?.contentSha256 ?? skill.realPath}`,
-    ),
-  };
+    (skill) =>
+      `${skill.name}\0${identities.get(skill.id)?.contentSha256 ?? skill.realPath}`,
+  );
 }
 
 export async function listProjectSkills(
   deps: AppDeps,
   args: { workspace: CommandWorkspace },
 ): Promise<SkillSummary[]> {
-  return (await projectSkillIndex(deps, args)).entries
+  return (await projectSkillIndex(deps, args))
     .map(({ realPath: _realPath, ...summary }) => summary)
     .sort(compareSkillSummaries);
 }
@@ -422,12 +432,77 @@ async function resolveProjectSkill(
     workspace: CommandWorkspace;
   },
 ): Promise<IndexedSkillSummary> {
-  const index = await projectSkillIndex(deps, { workspace: args.workspace });
-  const match = index.registrations.find((skill) => skill.id === args.skillId);
-  if (!match) {
+  const serverSkill = (await listServerSkills(deps)).find(
+    (skill) => skill.id === args.skillId,
+  );
+  if (serverSkill !== undefined) {
+    await confirmServerSkillManageable(serverSkill);
+    return {
+      ...serverSkill,
+      realPath: await fs
+        .realpath(serverSkill.filePath)
+        .catch(() => serverSkill.filePath),
+    };
+  }
+  const hostSkill = await firstMatch([
+    ...scanProviderSkills(deps, args.workspace).map(async (scan) => {
+      const { provider, skills } = await scan;
+      const skill = skills.find((candidate) => candidate.id === args.skillId);
+      return skill === undefined
+        ? null
+        : {
+            ...toProviderSkillSummary(provider, skill),
+            realPath: skill.realPath,
+          };
+    }),
+    resolveSharedSkills(deps, {
+      hostId: args.workspace.hostId,
+      cwd: args.workspace.cwd,
+    }).then((shared) => {
+      const summary = shared.summaries.find(
+        (candidate) => candidate.id === args.skillId,
+      );
+      return summary === undefined
+        ? null
+        : {
+            ...summary,
+            realPath:
+              shared.identities.get(summary.id)?.realPath ?? summary.filePath,
+          };
+    }),
+  ]);
+  if (hostSkill === null) {
     throw new ApiError(404, "not_found", "Skill not found");
   }
-  return match;
+  return hostSkill;
+}
+
+function firstMatch<T>(
+  lookups: ReadonlyArray<Promise<T | null>>,
+): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    let pending = lookups.length;
+    let failure: { error: unknown } | null = null;
+    const settle = () => {
+      pending -= 1;
+      if (pending > 0) return;
+      if (failure === null) resolve(null);
+      else reject(failure.error);
+    };
+    if (pending === 0) resolve(null);
+    for (const lookup of lookups) {
+      lookup.then(
+        (value) => {
+          if (value !== null) resolve(value);
+          settle();
+        },
+        (error: unknown) => {
+          failure ??= { error };
+          settle();
+        },
+      );
+    }
+  });
 }
 
 export async function listProjectSkillFiles(

@@ -66,6 +66,7 @@ function registerSkillRpc(
     hostId: string;
     sessionId: string;
     skillsByProvider?: Record<string, DiscoveredSkill[]>;
+    failingListProviders?: string[];
     deletedPath?: string;
     listedFiles?: string[];
     fileContents?: Record<string, string>;
@@ -79,6 +80,16 @@ function registerSkillRpc(
     hostId: args.hostId,
     sessionId: args.sessionId,
     handle: (request) => {
+      if (
+        request.command.type === "host.list_skills" &&
+        args.failingListProviders?.includes(request.command.providerId)
+      ) {
+        return {
+          ok: false,
+          errorCode: "skill_scan_failed",
+          errorMessage: "Skill scan failed",
+        };
+      }
       if (request.command.type === "host.list_skills") {
         return {
           ok: true,
@@ -1449,6 +1460,7 @@ describe("public project skills route", () => {
 
         const skill = matches[0];
         if (skill === undefined) throw new Error("Expected plugin skill");
+        const requestsBeforeRead = stub.requests.length;
         const query = new URLSearchParams({
           skillId: skill.id,
           environmentId: "",
@@ -1461,11 +1473,7 @@ describe("public project skills route", () => {
         expect(
           skillContentResponseSchema.parse(await readJson(contentResponse)),
         ).toMatchObject({ content: "# Plugin reference\n" });
-        expect(
-          stub.requests.some(
-            (request) => request.command.type === "host.read_file",
-          ),
-        ).toBe(false);
+        expect(stub.requests.slice(requestsBeforeRead)).toEqual([]);
       });
     } finally {
       await rm(workDir, { recursive: true, force: true });
@@ -1767,6 +1775,46 @@ describe("public project skills route", () => {
       await expect(read(skillId(codexPath))).resolves.toMatchObject({
         content: "# Codex review",
       });
+    });
+  });
+
+  it("reads a host skill from the scan that holds it when another provider's scan fails", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-partial-skill-scan",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/partial-skill-scan-project",
+      });
+      const claudePath = "/home/.claude/skills/review/SKILL.md";
+      registerSkillRpc(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        skillsByProvider: {
+          "claude-code": [discovered("review", "provider-user", claudePath)],
+        },
+        failingListProviders: ["codex"],
+        fileContentsByRoot: { "/home/.claude/skills/review": "# Review" },
+      });
+      const read = (id: string) =>
+        harness.app.request(
+          `/api/v1/projects/${project.id}/skills/content?${new URLSearchParams({
+            skillId: id,
+            path: "SKILL.md",
+            environmentId: "",
+          })}`,
+        );
+
+      const found = await read(skillId(claudePath));
+      expect(found.status).toBe(200);
+      expect(
+        skillContentResponseSchema.parse(await readJson(found)),
+      ).toMatchObject({ content: "# Review" });
+      const missing = await read(skillId("/home/.claude/skills/gone/SKILL.md"));
+      expect(missing.status).not.toBe(200);
+      expect(missing.status).not.toBe(404);
     });
   });
 
