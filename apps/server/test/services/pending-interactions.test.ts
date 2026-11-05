@@ -813,6 +813,7 @@ describe("pending interaction lifecycle", () => {
     it("re-arms persisted question timeouts when the server starts", async () => {
       await withTestHarness(async (harness) => {
         const { thread } = seedQuestionThread(harness, "restart");
+        vi.useFakeTimers();
         const interaction = registerQuestion(
           harness,
           harness.deps.pendingInteractions,
@@ -838,7 +839,6 @@ describe("pending interaction lifecycle", () => {
           telemetry: harness.deps.telemetry,
           terminalSessions: harness.deps.terminalSessions,
         });
-        vi.useFakeTimers();
         try {
           restarted.start();
           expect(readRow(harness, interaction.id)?.status).toBe("pending");
