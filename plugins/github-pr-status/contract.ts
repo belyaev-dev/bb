@@ -309,7 +309,11 @@ export const githubPrStatusHostContract = defineRpcContract({
   },
   act: {
     input: z
-      .object({ path: z.string().min(1), action: hostPullRequestActionSchema })
+      .object({
+        path: z.string().min(1),
+        url: z.string().url(),
+        action: hostPullRequestActionSchema,
+      })
       .strict(),
     output: hostPullRequestActionResultSchema,
   },

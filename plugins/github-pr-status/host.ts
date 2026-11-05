@@ -7,7 +7,7 @@ import {
   prepareUrlRead,
   preparedResult,
   readPullRequests,
-  runPullRequestActionForCurrentBranch,
+  runPullRequestAction,
   type PreparedRead,
 } from "./host/git-host.js";
 
@@ -59,19 +59,8 @@ export default experimental_defineHostEntry({
         branchName: branchName ?? null,
       };
     },
-    async act({ path, action }) {
-      const localBranch = await getCurrentBranch(path);
-      if (!localBranch) {
-        return {
-          ok: false as const,
-          message: "Cannot update pull request from a detached workspace",
-        };
-      }
-      return runPullRequestActionForCurrentBranch({
-        cwd: path,
-        localBranch,
-        action,
-      });
+    act({ path, url, action }) {
+      return runPullRequestAction({ cwd: path, url, action });
     },
   },
 });
